@@ -18,7 +18,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(properties = {
         "spring.data.redis.port=1",
-        "spring.data.redis.timeout=500ms"
+        "spring.data.redis.timeout=500ms",
+        // set the limit here too, so the tests do not depend on application.properties
+        "rate-limit.max-requests=5",
+        "rate-limit.window-seconds=60"
 })
 @AutoConfigureMockMvc
 class RateLimitInterceptorTest {

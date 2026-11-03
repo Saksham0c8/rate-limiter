@@ -2,6 +2,7 @@ package com.example.ratelimiter;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
@@ -13,7 +14,8 @@ import java.util.concurrent.TimeUnit;
  * Checks every incoming request BEFORE it reaches the controller.
  *
  * Strategy: Fixed Window.
- * Each user is allowed MAX_REQUESTS requests per WINDOW_SECONDS.
+ * Each user is allowed maxRequests requests per windowSeconds.
+ * Both numbers come from application.properties.
  * Once the window is over, the counter starts again from zero.
  *
  * Storage: Redis first. If Redis is down, we use a plain
@@ -22,9 +24,9 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class RateLimitInterceptor implements HandlerInterceptor {
 
-    // Settings (change these to test easily)
-    private static final int MAX_REQUESTS = 5;      // allowed requests per window
-    private static final int WINDOW_SECONDS = 60;   // window length in seconds
+    // Settings, read from application.properties
+    private final int maxRequests;      // allowed requests per window
+    private final int windowSeconds;    // window length in seconds
 
     // Used to talk to Redis
     private final StringRedisTemplate redisTemplate;
@@ -32,9 +34,16 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     // Local backup storage: key = user id, value = their counter
     private final ConcurrentHashMap<String, RequestCounter> localCounters = new ConcurrentHashMap<>();
 
-    // Spring gives us the StringRedisTemplate automatically (constructor injection)
-    public RateLimitInterceptor(StringRedisTemplate redisTemplate) {
+    // Spring gives us the StringRedisTemplate automatically (constructor injection).
+    // @Value reads a number from application.properties.
+    // The part after the colon is the default if the property is missing.
+    public RateLimitInterceptor(
+            StringRedisTemplate redisTemplate,
+            @Value("${rate-limit.max-requests:5}") int maxRequests,
+            @Value("${rate-limit.window-seconds:60}") int windowSeconds) {
         this.redisTemplate = redisTemplate;
+        this.maxRequests = maxRequests;
+        this.windowSeconds = windowSeconds;
     }
 
     /**
@@ -74,16 +83,16 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         }
 
         // 3. Work out how many requests the user has left (never below 0)
-        int remaining = Math.max(0, MAX_REQUESTS - requestCount);
+        int remaining = Math.max(0, maxRequests - requestCount);
 
         // 4. Add helpful headers to every response
-        response.setHeader("X-Rate-Limit-Limit", String.valueOf(MAX_REQUESTS));
+        response.setHeader("X-Rate-Limit-Limit", String.valueOf(maxRequests));
         response.setHeader("X-Rate-Limit-Remaining", String.valueOf(remaining));
 
         // 5. If the user went over the limit, block the request
-        if (requestCount > MAX_REQUESTS) {
+        if (requestCount > maxRequests) {
             response.setStatus(429); // 429 = Too Many Requests
-            response.setHeader("Retry-After", String.valueOf(WINDOW_SECONDS));
+            response.setHeader("Retry-After", String.valueOf(windowSeconds));
             response.setContentType("application/json");
             response.getWriter().write(
                     "{\"error\": \"Too many requests\", \"message\": \"Please wait and try again later.\"}");
@@ -109,7 +118,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     /**
      * Fixed window counting with Redis.
      * INCR adds 1 to the key (it creates the key with value 1 if missing).
-     * On the very first request we set the key to expire after WINDOW_SECONDS,
+     * On the very first request we set the key to expire after windowSeconds,
      * so Redis resets the counter for us automatically.
      */
     private int countUsingRedis(String clientId) {
@@ -123,7 +132,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
         if (count == 1) {
             // first request in this window, start the timer
-            redisTemplate.expire(key, WINDOW_SECONDS, TimeUnit.SECONDS);
+            redisTemplate.expire(key, windowSeconds, TimeUnit.SECONDS);
         }
 
         return count.intValue();
@@ -140,7 +149,7 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         RequestCounter counter = localCounters.get(clientId);
 
         // New user, or their window is over -> start a fresh counter
-        if (counter == null || now - counter.windowStartMillis >= WINDOW_SECONDS * 1000L) {
+        if (counter == null || now - counter.windowStartMillis >= windowSeconds * 1000L) {
             counter = new RequestCounter(now);
             localCounters.put(clientId, counter);
         }
