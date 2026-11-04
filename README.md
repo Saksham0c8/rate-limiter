@@ -8,8 +8,9 @@ It uses a **Fixed Window** approach: each user gets **5 requests per 60 seconds*
 1. A request arrives at `/api/...`
 2. `RateLimitInterceptor.preHandle()` runs **before** the controller.
 3. It finds the user: the `user-id` header, or the IP address if there is no header.
-4. It counts the request in Redis (`INCR` + a 60 second expiry).
-   If Redis is down, it prints a warning and counts in a `ConcurrentHashMap` instead.
+4. It counts the request in Redis with one small Lua script (`INCR` + a 60 second expiry in a
+   single atomic call). If Redis is down, it prints a warning and counts in a
+   `ConcurrentHashMap` instead.
 5. Under the limit: the request continues. Over the limit: HTTP `429` with a JSON message.
 6. Every response has `X-Rate-Limit-Limit` and `X-Rate-Limit-Remaining` headers.
 
@@ -26,7 +27,12 @@ rate-limiter/
     │   ├── WebConfig.java                (registers the interceptor)
     │   └── RateLimitController.java      (test endpoints)
     ├── main/resources/application.properties
-    └── test/java/com/example/ratelimiter/RateLimitInterceptorTest.java
+    └── test/java/com/example/ratelimiter/
+        ├── RateLimitInterceptorTest.java (basic behaviour)
+        └── ConcurrencyTest.java          (200 simultaneous requests)
+benchmarks/
+├── load-test.js                          (k6 load test)
+└── RESULTS.md                            (my measured results)
 ```
 
 ## Requirements
@@ -77,14 +83,37 @@ Other endpoints: `/api/hello?name=Sam` and `/api/time`.
 mvn test
 ```
 
+This runs 5 tests. One of them (`ConcurrencyTest`) fires 200 requests at once from a
+single user with a limit of 5, and checks that exactly 5 are allowed.
+
+## Load test
+
+Install [k6](https://k6.io/docs/get-started/installation/), set
+`rate-limit.max-requests=1000000` so the limit does not block the test, start the app, then:
+
+```bash
+k6 run benchmarks/load-test.js
+```
+
+Write your results in `benchmarks/RESULTS.md`.
+
+## Why a Lua script for Redis?
+
+The first version used two Redis commands: `INCR`, then `EXPIRE` on the first request.
+If the app crashed between them, the counter would never expire and that user could
+be blocked forever. The Lua script runs both steps inside Redis as one unit, so this
+cannot happen. It also cuts Redis round trips on a user's first request from 2 to 1.
+
 ## Change the limit
 
-Open `RateLimitInterceptor.java` and edit:
+Open `src/main/resources/application.properties` and edit:
 
-```java
-private static final int MAX_REQUESTS = 5;
-private static final int WINDOW_SECONDS = 60;
+```properties
+rate-limit.max-requests=5
+rate-limit.window-seconds=60
 ```
+
+Restart the app after changing them. No code changes are needed.
 
 ## Known limitations (good ideas for improvement)
 
@@ -94,4 +123,4 @@ private static final int WINDOW_SECONDS = 60;
 - `request.getRemoteAddr()` shows the proxy's IP if the app is behind a load balancer.
   You would then read the `X-Forwarded-For` header.
 - The `user-id` header can be faked, so a real app would use login/API keys.
-- Settings are hard-coded constants instead of coming from `application.properties`.
+- One limit applies to every endpoint. Per-endpoint limits would be a good next step.

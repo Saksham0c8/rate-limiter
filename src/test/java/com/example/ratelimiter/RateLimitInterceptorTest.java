@@ -58,6 +58,7 @@ class RateLimitInterceptorTest {
                 .andExpect(header().exists("Retry-After"));
     }
 
+
     @Test
     void differentUsersHaveSeparateLimits() throws Exception {
         for (int i = 0; i < 6; i++) {
